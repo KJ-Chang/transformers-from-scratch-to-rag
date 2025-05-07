@@ -1,0 +1,5 @@
+model_name: 'distilbert-base-uncased'
+dataset: 'ag_news'
+model_path: './best'
+logging_dir: './logs'
+output_dir: './results'
