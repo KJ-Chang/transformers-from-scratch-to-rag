@@ -2,3 +2,6 @@ hf_xet
 sentence-transformers
 faiss-gpu
 numpy<2
+sentencepiece
+requests
+beautifulsoup4
