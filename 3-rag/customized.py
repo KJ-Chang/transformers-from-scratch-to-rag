@@ -4,20 +4,28 @@ A customized RAG pipeline using FAISS for retrieval and a pretrained language mo
 
 import faiss
 import torch
-import requests
-from bs4 import BeautifulSoup
-from datasets import load_dataset
+import yaml
+from pathlib import Path
+from util import scrape_and_chunk_website
+
 from sentence_transformers import SentenceTransformer
-from transformers import BertTokenizer, BertForQuestionAnswering
+from transformers import T5Tokenizer, T5ForConditionalGeneration, FalconForCausalLM, AutoTokenizer
+
+def load_config():
+    """Load configuration from YAML file."""
+    config_path = Path(__file__).parent / 'config.yaml'
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
 
 class CustomRAGPipeline:
-    def __init__(self, encoder_model_name, qa_model_name, device='cuda' if torch.cuda.is_available() else 'cpu'):
-        self.encoder = SentenceTransformer(encoder_model_name, device=device)
-        self.qa_model = BertForQuestionAnswering.from_pretrained(qa_model_name).to(device)
-        self.tokenizer = BertTokenizer.from_pretrained(qa_model_name)
+    def __init__(self, encoder, generator, tokenizer, device='cuda' if torch.cuda.is_available() else 'cpu'):
+        self.encoder = encoder.to(device)
+        self.tokenizer = tokenizer
+        self.generator = generator.to(device)
         self.index = None
         self.device = device
         self.documents = []
+        self.config = load_config()
 
     def add_documents(self, docs: list[str]):
         self.documents.extend(docs)
@@ -37,76 +45,149 @@ class CustomRAGPipeline:
         queries = []
         queries.extend(quers)
         queries_embeddings = self.encoder.encode(queries, convert_to_numpy=True)
-        _, ids = self.index.search(queries_embeddings, k=1)
-        retrieved_passages = [self.documents[i] for id in ids for i in id]
+        _, I = self.index.search(queries_embeddings, k=5)
         
+        retrieved_passages = []
+        for idxs in I:
+            tmp = []
+            for idx in idxs:
+                tmp.append(self.documents[idx])
+            retrieved_passages.append(tmp)
         return retrieved_passages
+    
+    def build_prompt(self, question, contexts):
+        context = '\n'.join(contexts)
+        prompt = f"""You are an AI assistant for question-answering tasks.
+You must follow the following six strict rules.
+
+STRICT RULES:
+1. ONLY use information directly stated in the context
+2. DO NOT generate any HTML tags or markup in your response
+3. If information is not in the context, say "I cannot find this information in the context"
+4. Provide clear and direct answers in plain text format
+5. DO NOT include any formatting tags like <strong>, <em>, or other
+6. Review the answer twice before outputing the final result  and keep the answer concise
+
+Context:
+{context}
+
+Question: 
+{question}
+
+Answer:"""
+        return prompt
 
     def answer_questions(self, queries: list[str]):
-        questions = queries
         contexts = self.search(queries)
-        inputs = self.tokenizer(questions, contexts, return_tensors='pt', padding=True, truncation=True).to(self.device)
+        
+        for q, c in zip(queries, contexts):
+            prompt = self.build_prompt(q, c)
+            if isinstance(self.generator, T5ForConditionalGeneration):
+                input_ids = self.tokenizer(
+                    prompt, 
+                    truncation=True,
+                    return_tensors='pt'
+                ).input_ids.to(self.device)
+                
+                output = self.generator.generate(
+                    input_ids,
+                    **self.config['generation']
+                )
+                answer = self.tokenizer.decode(
+                    output[0],
+                    skip_special_tokens=True
+                )
+                
+            elif isinstance(self.generator, FalconForCausalLM):
+                inputs = self.tokenizer(
+                    prompt,
+                    truncation=True,
+                    padding=True,
+                    return_attention_mask=True,
+                    return_tensors='pt'
+                ).to(self.device)
+
+                output = self.generator.generate(
+                    input_ids=inputs.input_ids,
+                    attention_mask=inputs.attention_mask,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    **self.config['generation']
+                )
+
+                # GPT架構生成會包含prompt
+                prompt_length = inputs.input_ids.shape[1]
+                answer = self.tokenizer.decode(
+                    output[0][prompt_length:],
+                    skip_special_tokens=True
+                )
+            
+            print(f'\nQuestion: {q}')
+            print(f'Answer: {answer}')
+
+def run_rag_pipeline_gpt(passages: list[str], queries: list[str]):
+    """Run RAG pipeline with GPT (Falcon) as the generator."""
+    config = load_config()
+    gpt_config = config['models']['gpt']
     
-        with torch.no_grad():
-            outputs = self.qa_model(**inputs)
+    encoder = SentenceTransformer(gpt_config['encoder'])
+    tokenizer = AutoTokenizer.from_pretrained(gpt_config['generator'])
+    tokenizer.pad_token = tokenizer.eos_token
 
-        # 提取 start 和 end logits
-        start_logits = outputs.start_logits
-        end_logits = outputs.end_logits
+    generator = FalconForCausalLM.from_pretrained(
+        gpt_config['generator'],
+        trust_remote_code=True,
+        torch_dtype=torch.float16  #  VRAM不足使用半精度
+    )
+    
+    print('\n' + '='*50)
+    print('Starting GPT (Falcon-7B) Pipeline')
+    print(f'Encoder: {gpt_config["encoder"]}')
+    print(f'Generator: {gpt_config["generator"]}')
+    print('='*50 + '\n')
+    
+    rag = CustomRAGPipeline(encoder, generator, tokenizer)
+    rag.add_documents(passages)
+    rag.answer_questions(queries)
 
-        # 轉換為答案的起始和結束位置
-        start_idx = torch.argmax(start_logits, dim=1)
-        end_idx = torch.argmax(end_logits, dim=1)
+def run_rag_pipeline_t5(passages: list[str], queries: list[str]):
+    """Run RAG pipeline with T5 as the generator."""
+    config = load_config()
+    t5_config = config['models']['t5']
+    
+    encoder = SentenceTransformer(t5_config['encoder'])
+    tokenizer = T5Tokenizer.from_pretrained(t5_config['generator'])
+    generator = T5ForConditionalGeneration.from_pretrained(t5_config['generator'])
 
-        # 使用 tokenizer 解碼出答案
-        for i in range(len(inputs.input_ids)):
-            answer = self.tokenizer.convert_tokens_to_string(
-                self.tokenizer.convert_ids_to_tokens(inputs.input_ids[i][start_idx[i]:end_idx[i]+1])
-            )
-            print('==================================================')
-            print(f'\nQuestion{i+1}: {queries[i]}')
-            print(f'\nContext{i+1}: {contexts[i]}')
-            print(f'\nAnswer{i+1}: {answer}')
+    print('\n' + '='*50)
+    print('Starting T5 Pipeline')
+    print(f'Encoder: {t5_config["encoder"]}')
+    print(f'Generator: {t5_config["generator"]}')
+    print('='*50 + '\n')
+    
+    rag = CustomRAGPipeline(encoder, generator, tokenizer)
+    rag.add_documents(passages)
+    rag.answer_questions(queries)
 
 def main():
-    # 使用 SoundCloud Addresses Terms of Use Allowing AI Training on Uploaded Music 文章
-    url = 'https://pitchfork.com/news/soundcloud-addresses-terms-of-use-allowing-ai-training-on-uploaded-music/'
-    headers = {
-        'User-Agent': 'Mosilla/5.0'
-    }
-    response = requests.get(url, headers=headers)
-    soup = BeautifulSoup(response.content, 'html.parser')
-    passages =[p.text for p in soup.find_all('p')]
-
-    # 問題
-    queries = [
-        'What clause did SoundCloud add to its terms of use in February 2024 regarding AI?',
-        'Has SoundCloud used artist content to train AI models according to their official statement?',
-        'What are the intended AI use cases described by SoundCloud?',
+    urls = [
+        'https://www.royaltek.com/about/whoweare/',
+        'https://www.royaltek.com/about/services/',
+        'https://www.royaltek.com/about/thecompany/',
     ]
 
-    # SQuAD
-    # dataset_name = 'squad'
-    # dataset = load_dataset(dataset_name, split='train')
-    # passages = [item['context'] for item in dataset]
-    # 排除相同的context
-    # passages = list(set(passages))
+    passages = scrape_and_chunk_website(urls, 300, 35)
 
-    # queries = [
-    #     'Who developed the theory of relativity?',
-    #     'Who invented the telephone?',
-    #     'What is the capital of United States?',
-    # ]
+    queries = [
+        "What products does Royaltek offer?",
+        "In what year was RoyalTek founded?",
+        "What types of products does RoyalTek offer for the automotive industry?",
+        "How has RoyalTek benefited from being part of Quanta Inc. since 2006?",
+        "What is RoyalTek's approach to customer service and product delivery?",
+        "What technologies does RoyalTek integrate into their solutions for location awareness and vehicle safety?",
+    ]
     
-    rag = CustomRAGPipeline(
-        encoder_model_name='all-MiniLM-L6-v2',
-        qa_model_name='Raghan/bert-finetuned-squad',
-        )
-    
-    rag.add_documents(passages)
-    # retrieved_passages = rag.search(queries)
-    rag.answer_questions(queries)
-    
+    run_rag_pipeline_t5(passages, queries)
+    run_rag_pipeline_gpt(passages, queries)
 
 if __name__ == '__main__':
     main()
