@@ -58,7 +58,7 @@ class CustomRAGPipeline:
     def build_prompt(self, question, contexts):
         context = '\n'.join(contexts)
         prompt = f"""You are an AI assistant for question-answering tasks.
-You must follow the following six strict rules.
+You must follow the following strict rules.
 
 STRICT RULES:
 1. ONLY use information directly stated in the context
@@ -66,7 +66,8 @@ STRICT RULES:
 3. If information is not in the context, say "I cannot find this information in the context"
 4. Provide clear and direct answers in plain text format
 5. DO NOT include any formatting tags like <strong>, <em>, or other
-6. Review the answer twice before outputing the final result  and keep the answer concise
+6. Review the answer twice before outputing the final result and keep the answer concise
+7. If you see 'Thanks', 'Thank you', or other, just say 'You are welcome'
 
 Context:
 {context}
@@ -79,6 +80,7 @@ Answer:"""
 
     def answer_questions(self, queries: list[str]):
         contexts = self.search(queries)
+        answers = []
         
         for q, c in zip(queries, contexts):
             prompt = self.build_prompt(q, c)
@@ -113,16 +115,15 @@ Answer:"""
                     pad_token_id=self.tokenizer.pad_token_id,
                     **self.config['generation']
                 )
-
-                # GPT架構生成會包含prompt
                 prompt_length = inputs.input_ids.shape[1]
                 answer = self.tokenizer.decode(
                     output[0][prompt_length:],
                     skip_special_tokens=True
                 )
             
-            print(f'\nQuestion: {q}')
-            print(f'Answer: {answer}')
+            answers.append(answer)
+
+        return answers
 
 def run_rag_pipeline_gpt(passages: list[str], queries: list[str]):
     """Run RAG pipeline with GPT (Falcon) as the generator."""
@@ -136,7 +137,7 @@ def run_rag_pipeline_gpt(passages: list[str], queries: list[str]):
     generator = FalconForCausalLM.from_pretrained(
         gpt_config['generator'],
         trust_remote_code=True,
-        torch_dtype=torch.float16  #  VRAM不足使用半精度
+        torch_dtype=torch.float16 # GPU RAM不夠 使用半精度
     )
     
     print('\n' + '='*50)
@@ -147,7 +148,7 @@ def run_rag_pipeline_gpt(passages: list[str], queries: list[str]):
     
     rag = CustomRAGPipeline(encoder, generator, tokenizer)
     rag.add_documents(passages)
-    rag.answer_questions(queries)
+    return rag.answer_questions(queries)
 
 def run_rag_pipeline_t5(passages: list[str], queries: list[str]):
     """Run RAG pipeline with T5 as the generator."""
@@ -166,7 +167,7 @@ def run_rag_pipeline_t5(passages: list[str], queries: list[str]):
     
     rag = CustomRAGPipeline(encoder, generator, tokenizer)
     rag.add_documents(passages)
-    rag.answer_questions(queries)
+    return rag.answer_questions(queries)
 
 def main():
     urls = [
@@ -186,8 +187,13 @@ def main():
         "What technologies does RoyalTek integrate into their solutions for location awareness and vehicle safety?",
     ]
     
-    run_rag_pipeline_t5(passages, queries)
-    run_rag_pipeline_gpt(passages, queries)
+    for i, answer in enumerate(run_rag_pipeline_t5(passages, queries)):
+        print(f'\nQuestion: {queries[i]}')
+        print(f'Answer: {answer}')
+
+    for i, answer in enumerate(run_rag_pipeline_gpt(passages, queries)):
+        print(f'\nQuestion: {queries[i]}')
+        print(f'Answer: {answer}')
 
 if __name__ == '__main__':
     main()
