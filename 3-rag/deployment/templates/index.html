@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>RAG Chat Interface</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        .container {
+            display: flex;
+            flex-grow: 1;
+            gap: 20px;
+        }
+        .chat-container {
+            flex-grow: 1;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 20px;
+            margin-bottom: 20px;
+            overflow-y: auto;
+            flex: 2;
+        }
+        .history-container {
+            flex: 1;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 20px;
+            overflow-y: auto;
+            max-width: 300px;
+        }
+        .message {
+            margin-bottom: 15px;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .user-message {
+            background-color: #e3f2fd;
+            margin-left: 20%;
+        }
+        .bot-message {
+            background-color: #f5f5f5;
+            margin-right: 20%;
+        }
+        .model-tag {
+            font-size: 0.8em;
+            color: #666;
+            margin-top: 5px;
+        }
+        .input-container {
+            display: flex;
+            gap: 10px;
+        }
+        #messageInput {
+            flex-grow: 1;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+        select {
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #1976D2;
+        }
+        .history-item {
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+            margin-bottom: 10px;
+        }
+        .history-timestamp {
+            font-size: 0.8em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        .history-question {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        .history-answer {
+            margin-left: 10px;
+            color: #444;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="chat-container" id="chatContainer"></div>
+        <div class="history-container" id="historyContainer">
+            <h3>Conversation History</h3>
+        </div>
+    </div>
+    <div class="input-container">
+        <select id="modelSelect">
+            <option value="t5">T5 Model</option>
+            <option value="gpt">GPT Model</option>
+        </select>
+        <input type="text" id="messageInput" placeholder="Type your message...">
+        <button onclick="sendMessage()">Send</button>
+    </div>
+
+    <script>
+        let ws = new WebSocket(`ws://${window.location.host}/ws`);
+        const chatContainer = document.getElementById('chatContainer');
+        const historyContainer = document.getElementById('historyContainer');
+        const messageInput = document.getElementById('messageInput');
+        const modelSelect = document.getElementById('modelSelect');
+
+        // 頁面加載時獲取歷史記錄
+        fetch('/conversation-history')
+            .then(response => response.json())
+            .then(history => {
+                updateHistoryContainer(history);
+            });
+
+        ws.onmessage = function(event) {
+            const response = JSON.parse(event.data);
+            addMessage(response.answer, 'bot', response.model);
+            updateHistoryContainer(response.history);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        };
+
+        ws.onclose = function(event) {
+            console.log("WebSocket connection closed");
+            setTimeout(function() {
+                ws = new WebSocket(`ws://${window.location.host}/ws`);
+            }, 1000);
+        };
+
+        function sendMessage() {
+            const message = messageInput.value.trim();
+            if (message) {
+                addMessage(message, 'user');
+                ws.send(JSON.stringify({
+                    message: message,
+                    model: modelSelect.value
+                }));
+                messageInput.value = '';
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }
+        }
+
+        function addMessage(text, sender, model = null) {
+            const messageDiv = document.createElement('div');
+            messageDiv.classList.add('message');
+            messageDiv.classList.add(sender + '-message');
+            messageDiv.textContent = text;
+            
+            if (model) {
+                const modelTag = document.createElement('div');
+                modelTag.classList.add('model-tag');
+                modelTag.textContent = `Using ${model.toUpperCase()} model`;
+                messageDiv.appendChild(modelTag);
+            }
+            
+            chatContainer.appendChild(messageDiv);
+        }
+
+        function updateHistoryContainer(history) {
+            historyContainer.innerHTML = '<h3>Conversation History</h3>';
+            history.forEach(item => {
+                const historyItem = document.createElement('div');
+                historyItem.classList.add('history-item');
+                
+                const timestamp = document.createElement('div');
+                timestamp.classList.add('history-timestamp');
+                const date = new Date(item.timestamp);
+                timestamp.textContent = date.toLocaleString();
+                
+                const question = document.createElement('div');
+                question.classList.add('history-question');
+                question.textContent = `Q: ${item.question}`;
+                
+                const answer = document.createElement('div');
+                answer.classList.add('history-answer');
+                answer.textContent = `A: ${item.answer}`;
+                
+                const model = document.createElement('div');
+                model.classList.add('model-tag');
+                model.textContent = `Model: ${item.model}`;
+                
+                historyItem.appendChild(timestamp);
+                historyItem.appendChild(question);
+                historyItem.appendChild(answer);
+                historyItem.appendChild(model);
+                
+                historyContainer.appendChild(historyItem);
+            });
+        }
+
+        messageInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>

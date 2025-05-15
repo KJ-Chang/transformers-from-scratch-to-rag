@@ -2,3 +2,4 @@ __pycache__
 1-text-classification/logs
 1-text-classification/results
 1-text-classification/best
+3-rag/deployment/chat_history/
